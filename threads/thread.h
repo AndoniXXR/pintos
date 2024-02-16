@@ -90,14 +90,28 @@ struct thread
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
 
-    /* $$$$ Our magical changes here $$$$ */
-    int64_t sleepingtime;  //
-    int basepriority;
-    struct thread *locker_thread;    //lock I am waiting for is acquired by this thread
-    struct list donation_list;       //list of all donated priorities (to me)
-    struct lock *waiting_on_lock;    //lock on which I am waiting
-    struct list_elem donorelem;      //list element for donations_list
-    /* $$$$ Our magical changes end  $$$$ */
+
+
+
+  // Tiempo total que el hilo ha estado bloqueado
+  int64_t sleepingtime;
+
+  // Prioridad base del hilo
+  int basepriority;
+
+  // Hilo que actualmente tiene bloqueado el candado por el que el hilo actual está esperando
+  struct thread *locker_thread;
+
+  // Lista de prioridades donadas temporalmente al hilo actual por otros hilos
+  struct list donation_list;
+
+  // Candado por el que el hilo actual está esperando
+  struct lock *waiting_on_lock;
+
+  // Elemento de la lista donation_list que representa la posición del hilo actual
+  struct list_elem donorelem;
+
+
 
     struct list_elem allelem;           /* List element for all threads list. */
 
