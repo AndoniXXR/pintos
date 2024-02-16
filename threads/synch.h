@@ -41,9 +41,13 @@ void cond_wait (struct condition *, struct lock *);
 void cond_signal (struct condition *, struct lock *);
 void cond_broadcast (struct condition *, struct lock *);
 
-/* $$$$ Our magical changes here */
-bool conditional_var_comparator(struct list_elem *a,struct list_elem *b,void *aux);
-/* $$$$ Our magical changes end  */
+
+// Función de comparación para la variable de condición
+// Compara dos elementos de la lista, que son nodos de hilo (struct thread)
+// El criterio de comparación es la prioridad de los hilos asociados a los elementos
+// Retorna true si la prioridad del primer hilo es menor que la del segundo, false de lo contrario
+bool conditional_var_comparator(struct list_elem *a, struct list_elem *b, void *aux);
+
 
 /* Optimization barrier.
 

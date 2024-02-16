@@ -69,10 +69,10 @@ sema_down (struct semaphore *sema)
   old_level = intr_disable ();
   while (sema->value == 0)
     {
-      /* $$$$ Our magical changes here */
-      //insert in waiting list, sorted according to priority so that highest priority thread is awakened first
-      list_insert_ordered (&sema->waiters, &thread_current ()->elem,(list_less_func *) &priority_comparator,NULL);
-      /* $$$$ Our magical changes end */
+    // Inserta el hilo actual en la lista de espera del semáforo, ordenándolo según la prioridad
+    // Esto garantiza que el hilo de mayor prioridad esté al principio de la lista y se despierte primero
+    list_insert_ordered (&sema->waiters, &thread_current ()->elem, (list_less_func *) &priority_comparator, NULL);
+
       thread_block ();
     }
   sema->value--;
@@ -118,16 +118,21 @@ sema_up (struct semaphore *sema)
 
   old_level = intr_disable ();
 
-  /* $$$$ Our magical changes here */
-  struct list_elem *father_element;
-  if (!list_empty (&sema->waiters)){
 
-    list_sort(&sema->waiters,(list_less_func *) &priority_comparator,NULL);  //sort waiter list to assure that they are in descending order
-    father_element=list_pop_front(&sema->waiters);    //remove thread with highest priority
-    thread_unblock(list_entry(father_element,struct thread,elem));
-  /* $$$$ Our magical changes end  */
 
-  }
+// Verifica si la lista de espera del semáforo no está vacía
+struct list_elem *father_element;
+if (!list_empty (&sema->waiters)){
+
+  // Ordena la lista de espera para asegurarse de que esté en orden descendente de prioridad
+  list_sort(&sema->waiters, (list_less_func *) &priority_comparator, NULL);
+
+  // Extrae el elemento al frente de la lista (mayor prioridad) y desbloquea el hilo asociado
+  father_element = list_pop_front(&sema->waiters);
+  thread_unblock(list_entry(father_element, struct thread, elem));
+}
+
+
   sema->value++;
   intr_set_level (old_level);
   if (!intr_context())
@@ -205,47 +210,50 @@ lock_init (struct lock *lock)
    interrupts disabled, but interrupts will be turned back on if
    we need to sleep. */
 void
-lock_acquire (struct lock *lock)
+lock_acquire(struct lock *lock)
 {
-  ASSERT (lock != NULL);
-  ASSERT (!intr_context ());
-  ASSERT (!lock_held_by_current_thread (lock));
+  ASSERT(lock != NULL);
+  ASSERT(!intr_context());
+  ASSERT(!lock_held_by_current_thread(lock));
 
-  /* $$$$ Our magical changes here */
+
   enum intr_level old_level;
-  old_level= intr_disable ();
+  old_level = intr_disable();
 
-  if(lock->holder==NULL)
-    thread_current()->locker_thread = NULL;  //waiting for nobody i.e., not stopped/locked due to other thread acquiring this lock
+  // Comprueba si el candado no está siendo sostenido por ningún hilo
+  if (lock->holder == NULL)
+    thread_current()->locker_thread = NULL;  // Ningún hilo tiene el candado; establece locker_thread como NULL
 
-  else    //some thread is already holding this lock
+  else  // Algún hilo ya tiene este candado
   {
-    thread_current()->locker_thread= lock->holder;   //current lock's holder is locking me
-    list_push_front(&lock->holder->donation_list,&thread_current()->donorelem);    //will be donating priority
+    thread_current()->locker_thread = lock->holder;   // El titular actual del candado está bloqueando el hilo actual
+    list_push_front(&lock->holder->donation_list, &thread_current()->donorelem);
+    // Dona prioridad al titular del candado al colocar el hilo actual en la donation_list del titular
 
-    struct thread *cur_thread= thread_current();
-    cur_thread->waiting_on_lock= lock;    //waiting_on_lock for this lock
+    struct thread *cur_thread = thread_current();
+    cur_thread->waiting_on_lock = lock;  // Establece waiting_on_lock para este candado
 
-    while(cur_thread->locker_thread!=NULL)       //while the lock acquirer does not releases lock
+    while (cur_thread->locker_thread != NULL)
     {
       /*
-      If my priority is higher, I donate to lock acquirer so that it finishes it's execution
-      and releases the lock
+      Si la prioridad del hilo actual es mayor que la prioridad del adquiridor del candado,
+      dona prioridad al adquiridor del candado para que termine su ejecución y libere el candado
       */
-      if(cur_thread->priority >cur_thread->locker_thread->priority)
+      if (cur_thread->priority > cur_thread->locker_thread->priority)
       {
-        cur_thread->locker_thread->priority=cur_thread->priority;  // $$$$$ ACTUAL PRIORITY DONATION HERE $$$$$$
-        cur_thread= cur_thread->locker_thread;       //now running thread is the thread acquiring lock
-        //thread_yield();
+        cur_thread->locker_thread->priority = cur_thread->priority;  // $$$$$ DONACIÓN DE PRIORIDAD REAL AQUÍ $$$$$$
+        cur_thread = cur_thread->locker_thread;  // Ahora el hilo en ejecución es el hilo adquiriendo el candado
       }
     }
   }
-  /* $$$$ Our magical changes end  */
 
-  sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
-  intr_set_level (old_level);
+
+  // Adquiere el semáforo asociado con el candado
+  sema_down(&lock->semaphore);
+  lock->holder = thread_current();  // Establece el hilo actual como el titular del candado
+  intr_set_level(old_level);
 }
+
 
 /* Tries to acquires LOCK and returns true if successful or false
    on failure.  The lock must not already be held by the current
@@ -254,26 +262,26 @@ lock_acquire (struct lock *lock)
    This function will not sleep, so it may be called within an
    interrupt handler. */
 bool
-lock_try_acquire (struct lock *lock)
+lock_try_acquire(struct lock *lock)
 {
-  bool success;
+  ASSERT(lock != NULL);
+  ASSERT(!lock_held_by_current_thread(lock));
 
-  ASSERT (lock != NULL);
-  ASSERT (!lock_held_by_current_thread (lock));
+  // Intenta bajar el semáforo asociado al candado
+  bool success = sema_try_down(&lock->semaphore);
 
-  success = sema_try_down (&lock->semaphore);
-  if (success)
-    lock->holder = thread_current ();
-
- /* $$$$ Our magical changes here */
-  else{
-
-      lock_acquire(lock);
+  if (!success) {
+    // Si no se pudo adquirir el candado, intenta adquirirlo utilizando la función lock_acquire
+    lock_acquire(lock);
+  } else {
+    // Si se adquirió el candado exitosamente, establece al hilo actual como su titular
+    lock->holder = thread_current();
   }
-  /* $$$$ Our magical changes end  */
 
-  return success;
+  return success;  // Retorna true si se adquirió el candado exitosamente, false de lo contrario
 }
+
+
 
 /* Releases LOCK, which must be owned by the current thread.
 
@@ -281,62 +289,72 @@ lock_try_acquire (struct lock *lock)
    make sense to try to release a lock within an interrupt
    handler. */
 void
-lock_release (struct lock *lock)
+lock_release(struct lock *lock)
 {
-  ASSERT (lock != NULL);
-  ASSERT (lock_held_by_current_thread (lock));
+  // Asegurarse de que el candado y el hilo actual sean válidos
+  ASSERT(lock != NULL);
+  ASSERT(lock_held_by_current_thread(lock));
 
+  // Liberar el candado y permitir que otros hilos lo adquieran
   lock->holder = NULL;
-  sema_up (&lock->semaphore);
+  sema_up(&lock->semaphore);
 
-  /* $$$$ Our magical changes here */
+
+  // Deshabilitar las interrupciones para realizar operaciones críticas
   enum intr_level old_level;
-  old_level=intr_disable ();
+  old_level = intr_disable();
 
-  if(!list_empty(&thread_current()->donation_list)){
-
-
+  // Verificar si hay donadores de prioridad
+  if (!list_empty(&thread_current()->donation_list))
+  {
+    // Iterar sobre la lista de donadores de prioridad
     struct list_elem *iter;
-    for (iter = list_begin(&thread_current()->donation_list); iter!=list_end(&thread_current()->donation_list);iter= list_next(iter))
+    for (iter = list_begin(&thread_current()->donation_list); iter != list_end(&thread_current()->donation_list); iter = list_next(iter))
     {
-      if(list_entry (iter, struct thread, donorelem)->waiting_on_lock ==lock)    // if this thread was waiting_on_lock for this lock
+      // Si el donador estaba esperando por este candado, quitarlo de la lista de donadores
+      if (list_entry(iter, struct thread, donorelem)->waiting_on_lock == lock)
       {
-        list_remove(iter);        //  remove from the list of priority donators
-        list_entry(iter, struct thread, donorelem)->waiting_on_lock = NULL;     //  unblock this donator
+        list_remove(iter);
+        list_entry(iter, struct thread, donorelem)->waiting_on_lock = NULL; // Desbloquear al donador
       }
-      else continue;
+      else
+        continue;
     }
 
-    struct thread *max_donor= list_entry(list_begin(&thread_current()->donation_list),struct thread, donorelem);
+    // Encontrar el donador de mayor prioridad
+    struct thread *max_donor = list_entry(list_begin(&thread_current()->donation_list), struct thread, donorelem);
 
-    for (iter = list_begin(&thread_current()->donation_list); iter!=list_end(&thread_current()->donation_list);iter= list_next(iter))
+    for (iter = list_begin(&thread_current()->donation_list); iter != list_end(&thread_current()->donation_list); iter = list_next(iter))
     {
-      if(list_entry (iter, struct thread, donorelem)->priority > max_donor->priority)
-        max_donor=list_entry(iter,struct thread,donorelem);
-
+      // Actualizar al donador de mayor prioridad si se encuentra un donador con una prioridad más alta
+      if (list_entry(iter, struct thread, donorelem)->priority > max_donor->priority)
+        max_donor = list_entry(iter, struct thread, donorelem);
     }
 
-    if(thread_current()->basepriority < max_donor->priority)
+    // Actualizar la prioridad del hilo actual si es menor que la prioridad del donador máximo
+    if (thread_current()->basepriority < max_donor->priority)
     {
-
-       thread_current()->priority = max_donor->priority;
-       thread_yield();
+      thread_current()->priority = max_donor->priority;
+      thread_yield(); // Ceder el procesador al hilo de mayor prioridad
     }
-    else{
-         thread_set_priority(thread_current()->basepriority);
+    else
+    {
+      thread_set_priority(thread_current()->basepriority);
     }
-
   }
-
   else
   {
-     thread_set_priority(thread_current()->basepriority);     //restore original priority as no donators were there
+    thread_set_priority(thread_current()->basepriority); // Restaurar la prioridad original si no hay donadores
   }
 
-  intr_set_level (old_level);
-  /* $$$$ Our magical changes end  */
-  intr_set_level (old_level);
+  // Restablecer las interrupciones a su nivel original
+  intr_set_level(old_level);
+
+  intr_set_level(old_level);
 }
+
+
+
 
 /* Returns true if the current thread holds LOCK, false
    otherwise.  (Note that testing whether some other thread holds
@@ -398,7 +416,7 @@ cond_wait (struct condition *cond, struct lock *lock)
   ASSERT (lock_held_by_current_thread (lock));
 
   sema_init (&waiter.semaphore, 0);
-  //list_insert_ordered (&cond->waiters, &waiter.elem,(list_less_func *) &conditional_var_comparator,NULL);
+
   list_push_back (&cond->waiters, &waiter.elem);
   lock_release (lock);
   sema_down (&waiter.semaphore);
@@ -413,23 +431,28 @@ cond_wait (struct condition *cond, struct lock *lock)
    make sense to try to signal a condition variable within an
    interrupt handler. */
 void
-cond_signal (struct condition *cond, struct lock *lock UNUSED)
+cond_signal(struct condition *cond, struct lock *lock UNUSED)
 {
-  ASSERT (cond != NULL);
-  ASSERT (lock != NULL);
-  ASSERT (!intr_context ());
-  ASSERT (lock_held_by_current_thread (lock));
+  // Asegurarse de que los argumentos sean válidos
+  ASSERT(cond != NULL);
+  ASSERT(lock != NULL);
+  ASSERT(!intr_context());
+  ASSERT(lock_held_by_current_thread(lock));
 
-  if (!list_empty (&cond->waiters))
+  // Verificar si hay hilos esperando en la condición
+  if (!list_empty(&cond->waiters))
   {
-    /* $$$$ Our magical changes here */
 
-    list_sort (&cond->waiters,(list_less_func *) &conditional_var_comparator, NULL);
+    // Ordenar la lista de hilos en espera por prioridad utilizando conditional_var_comparator
+    list_sort(&cond->waiters, (list_less_func *)&conditional_var_comparator, NULL);
 
-    /* $$$$ Our magical changes end  */
-    sema_up (&list_entry (list_pop_front (&cond->waiters),struct semaphore_elem, elem)->semaphore);
+
+    // Despertar al hilo de mayor prioridad esperando en la variable de condición
+    sema_up(&list_entry(list_pop_front(&cond->waiters), struct semaphore_elem, elem)->semaphore);
   }
 }
+
+
 
 /* Wakes up all threads, if any, waiting on COND (protected by
    LOCK).  LOCK must be held before calling this function.
@@ -448,19 +471,23 @@ cond_broadcast (struct condition *cond, struct lock *lock)
 }
 
 
-/* $$$$ Our magical changes here  */
-bool conditional_var_comparator(struct list_elem *a,struct list_elem *b, void *aux){
+bool conditional_var_comparator(struct list_elem *a, struct list_elem *b, void *aux) {
+  // Extraer los elementos del semáforo de cada lista
+  struct semaphore_elem *semaphore_one = list_entry(a, struct semaphore_elem, elem);
+  struct semaphore_elem *semaphore_two = list_entry(b, struct semaphore_elem, elem);
 
-  struct semaphore_elem *semaphore_one = list_entry(a,struct semaphore_elem,elem);
-  struct semaphore_elem *semaphore_two = list_entry(b,struct semaphore_elem,elem);
+  // Obtener los hilos del frente de la lista de espera de cada semáforo
+  struct thread *s_one = list_entry(list_front(&semaphore_one->semaphore.waiters), struct thread, elem);
+  struct thread *s_two = list_entry(list_front(&semaphore_two->semaphore.waiters), struct thread, elem);
 
-  struct thread *s_one= list_entry(list_front(&semaphore_one->semaphore.waiters), struct thread, elem);
-  struct thread *s_two= list_entry(list_front(&semaphore_two->semaphore.waiters), struct thread, elem);
-
-  if(s_one->priority > s_two->priority)
+  // Comparar las prioridades de los hilos para determinar el orden
+  if (s_one->priority > s_two->priority) {
+    // El hilo en el elemento 'a' tiene mayor prioridad, debe despertarse primero
     return true;
-  else return false;
-
+  } else {
+    // El hilo en el elemento 'b' tiene mayor prioridad o las prioridades son iguales,
+    // debería estar delante o en la misma posición
+    return false;
+  }
 }
 
-/* $$$$ Our magical changes end  */
