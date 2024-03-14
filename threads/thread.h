@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "userprog/syscall.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -18,7 +19,6 @@ enum thread_status
    You can redefine this to whatever type you like. */
 typedef int tid_t;
 #define TID_ERROR ((tid_t) -1)          /* Error value for tid_t. */
-
 
 /* Thread priorities. */
 #define PRI_MIN 0                       /* Lowest priority. */
@@ -80,7 +80,7 @@ typedef int tid_t;
    semaphore wait list (synch.c).  It can be used these two ways
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
-   waiting_on_lock state is on a semaphore wait list. */
+   blocked state is on a semaphore wait list. */
 struct thread
   {
     /* Owned by thread.c. */
@@ -89,30 +89,6 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
-
-
-
-
-  // Tiempo total que el hilo ha estado bloqueado
-  int64_t sleepingtime;
-
-  // Prioridad base del hilo
-  int basepriority;
-
-  // Hilo que actualmente tiene bloqueado el candado por el que el hilo actual está esperando
-  struct thread *locker_thread;
-
-  // Lista de prioridades donadas temporalmente al hilo actual por otros hilos
-  struct list donation_list;
-
-  // Candado por el que el hilo actual está esperando
-  struct lock *waiting_on_lock;
-
-  // Elemento de la lista donation_list que representa la posición del hilo actual
-  struct list_elem donorelem;
-
-
-
     struct list_elem allelem;           /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
@@ -125,6 +101,17 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
+
+		/* Para los syscall */
+    struct list file_list;      /* Lista de las filas */
+    int fd;                     /* Descripción de la fila */
+
+    struct list child_list;     /* Lista de procesos hijos */
+    tid_t parent;               /* id de los padres */
+
+    struct child_process* cp;   /* Puntero al proceso hijo */
+    struct file* executable;    /* Se usa para denegar escrituras en ejecutables */
+    struct list lock_list;      /* Se utiliza para realizar un seguimiento de los bloqueos que tiene el thread */
   };
 
 /* If false (default), use round-robin scheduler.
@@ -163,19 +150,7 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-
-/*Esta función compara dos elementos de lista basándose en el tiempo de suspensión de los hilos asociados.
-Devuelve verdadero si el tiempo de suspensión del primer hilo es menor que el del segundo.*/
-bool sleeptime_comparator(struct list_elem *a, struct list_elem *b, void *aux);
-
-/*Esta función compara dos elementos de lista basándose en la prioridad de los hilos asociados.
- Devuelve verdadero si la prioridad del primer hilo es mayor que la del segundo.*/
-bool priority_comparator(struct list_elem *a, struct list_elem *b, void *aux);
-
-/*Esta función compara dos elementos de lista basándose en la prioridad de los hilos asociados, pero en orden inverso.
- Devuelve verdadero si la prioridad del primer hilo es menor que la del segundo.*/
-bool priority_comparator_reverse(struct list_elem *a, struct list_elem *b, void *aux);
-
-
-
+int is_thread_alive (int pid);
+struct child_process* add_child_process (int pid);
+void thread_release_locks(void);
 #endif /* threads/thread.h */

@@ -4,7 +4,6 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -12,8 +11,10 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "userprog/syscall.h" /* Se incluye la llamada a syscall */
 #endif
 
 /* Random value for struct thread's `magic' member.
@@ -135,7 +136,7 @@ thread_tick (void)
   else
     kernel_ticks++;
 
- /* Enforce preemption. */
+  /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 }
@@ -164,47 +165,60 @@ thread_print_stats (void)
    PRIORITY, but no actual priority scheduling is implemented.
    Priority scheduling is the goal of Problem 1-3. */
 tid_t
-thread_create(const char *name, int priority, thread_func *function, void *aux) {
-  // Reserva memoria para el nuevo hilo
-  struct thread *t = palloc_get_page(PAL_ZERO);
+thread_create (const char *name, int priority,
+               thread_func *function, void *aux)
+{
+  struct thread *t;
+  struct kernel_thread_frame *kf;
+  struct switch_entry_frame *ef;
+  struct switch_threads_frame *sf;
+  tid_t tid;
+  enum intr_level old_level;
+
+  ASSERT (function != NULL);
+
+  /* Allocate thread. */
+  t = palloc_get_page (PAL_ZERO);
   if (t == NULL)
     return TID_ERROR;
 
-  // Inicializa el hilo con el nombre y la prioridad proporcionados
-  init_thread(t, name, priority);
-  tid_t tid = t->tid = allocate_tid();
+  /* Initialize thread. */
+  init_thread (t, name, priority);
+  tid = t->tid = allocate_tid ();
 
-  // Configura el marco de la pila para kernel_thread()
-  struct kernel_thread_frame *kf = alloc_frame(t, sizeof *kf);
+  /* Prepara el thread para la primera ejecución inicializando su pila.
+     Hacer esto atómicamente por lo que los valores intermedios de la 'pila'
+     no pueden ser observados.
+ */
+  old_level = intr_disable ();
+
+  /* Stack frame for kernel_thread(). */
+  kf = alloc_frame (t, sizeof *kf);
   kf->eip = NULL;
   kf->function = function;
   kf->aux = aux;
 
-  // Configura el marco de la pila para switch_entry()
-  struct switch_entry_frame *ef = alloc_frame(t, sizeof *ef);
-  ef->eip = (void (*)(void))kernel_thread;
+  /* Stack frame for switch_entry(). */
+  ef = alloc_frame (t, sizeof *ef);
+  ef->eip = (void (*) (void)) kernel_thread;
 
-  // Configura el marco de la pila para switch_threads()
-  struct switch_threads_frame *sf = alloc_frame(t, sizeof *sf);
+  /* Stack frame for switch_threads(). */
+  sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
 
-  // Agrega el nuevo hilo a la cola de ejecución
-  thread_unblock(t);
+  intr_set_level (old_level);
 
-  // Comprueba si el nuevo hilo tiene una prioridad más alta que el hilo en ejecución
-  enum intr_level old_level = intr_disable();
-  struct thread *runningThread = thread_current();
-  if (runningThread != idle_thread && t->priority > runningThread->priority) {
-    // Cede el CPU al nuevo hilo
-    thread_yield();
-  }
-  intr_set_level(old_level);
+	/* Añade el proceso hijo a una lista de hijos */
+  t->parent = thread_tid();
+  struct child_process *cp = add_child_process(t->tid);
+  t->cp = cp;
+
+  /* Add to run queue. */
+  thread_unblock (t);
 
   return tid;
 }
-
-
 
 /* Puts the current thread to sleep.  It will not be scheduled
    again until awoken by thread_unblock().
@@ -222,43 +236,27 @@ thread_block (void)
   schedule ();
 }
 
-/* Transitions a waiting_on_lock thread T to the ready-to-run state.
-   This is an error if T is not waiting_on_lock.  (Use thread_yield() to
+/* Transitions a blocked thread T to the ready-to-run state.
+   This is an error if T is not blocked.  (Use thread_yield() to
    make the running thread ready.)
 
    This function does not preempt the running thread.  This can
    be important: if the caller had disabled interrupts itself,
    it may expect that it can atomically unblock a thread and
    update other data. */
-/*
-Esta función desbloquea un hilo, lo que significa que pasa de un estado bloqueado a un estado listo para ejecutarse.
-*/
-
 void
-thread_unblock(struct thread *t) {
+thread_unblock (struct thread *t)
+{
   enum intr_level old_level;
 
-  // Verifica que el argumento proporcionado sea un hilo válido
-  ASSERT(is_thread(t));
+  ASSERT (is_thread (t));
 
-  // Deshabilita las interrupciones temporariamente para evitar condiciones de carrera
-  old_level = intr_disable();
-
-  // Verifica que el hilo esté en estado bloqueado
-  ASSERT(t->status == THREAD_BLOCKED);
-
-  /* $$$$ Nuestros cambios mágicos comienzan aquí $$$$ */
-  // Inserta el hilo desbloqueado en la lista de hilos listos, manteniéndola ordenada por prioridad
-  list_insert_ordered(&ready_list, &t->elem, (list_less_func *)&priority_comparator, NULL);
-  /* $$$$ Nuestros cambios mágicos terminan aquí $$$$ */
-
-  // Actualiza el estado del hilo a listo para ejecutarse
+  old_level = intr_disable ();
+  ASSERT (t->status == THREAD_BLOCKED);
+  list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
-
-  // Restaura el nivel de interrupción al valor anterior
-  intr_set_level(old_level);
+  intr_set_level (old_level);
 }
-
 
 /* Returns the name of the running thread. */
 const char *
@@ -308,7 +306,8 @@ thread_exit (void)
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
   intr_disable ();
-
+  /* Libera los cierres de los threads */
+  thread_release_locks();
   list_remove (&thread_current()->allelem);
   thread_current ()->status = THREAD_DYING;
   schedule ();
@@ -317,56 +316,21 @@ thread_exit (void)
 
 /* Yields the CPU.  The current thread is not put to sleep and
    may be scheduled again immediately at the scheduler's whim. */
-/*
-Esta función cede el control del procesador al siguiente hilo listo para ejecutarse en la cola de hilos listos.
-*/
-
 void
-thread_yield(void) {
-  struct thread *cur = thread_current();
+thread_yield (void)
+{
+  struct thread *cur = thread_current ();
   enum intr_level old_level;
 
-  // Verifica que no se llame desde un contexto de interrupción
-  ASSERT(!intr_context());
+  ASSERT (!intr_context ());
 
-  // Deshabilita temporalmente las interrupciones para evitar condiciones de carrera
-  old_level = intr_disable();
-
-  /* $$$$ Nuestros cambios mágicos comienzan aquí $$$$ */
-  // Si el hilo actual no es el hilo inactivo, inserta el hilo actual en la lista de hilos listos, manteniéndola ordenada por prioridad
+  old_level = intr_disable ();
   if (cur != idle_thread)
-    list_insert_ordered(&ready_list, &cur->elem, (list_less_func *)&priority_comparator, NULL);
-  // Se ha eliminado la inserción simple en la parte posterior de la lista y ahora se inserta en orden según la prioridad
-  /* $$$$ Nuestros cambios mágicos terminan aquí $$$$ */
-
-  // Actualiza el estado del hilo a listo para ejecutarse
+    list_push_back (&ready_list, &cur->elem);
   cur->status = THREAD_READY;
-
-  // Llama a la función de programación para determinar qué hilo debe ejecutarse a continuación
-  schedule();
-
-  // Restaura el nivel de interrupción al valor anterior
-  intr_set_level(old_level);
+  schedule ();
+  intr_set_level (old_level);
 }
-
-
-
-/* Comparador para ordenar por tiempo de suspensión */
-bool sleeptime_comparator(struct list_elem *a, struct list_elem *b, void *aux) {
-  return list_entry(a, struct thread, elem)->sleepingtime < list_entry(b, struct thread, elem)->sleepingtime;
-}
-
-/* Comparador para ordenar por prioridad en orden ascendente */
-bool priority_comparator_reverse(struct list_elem *a, struct list_elem *b, void *aux) {
-  return list_entry(a, struct thread, elem)->priority < list_entry(b, struct thread, elem)->priority;
-}
-
-/* Comparador para ordenar por prioridad en orden descendente */
-bool priority_comparator(struct list_elem *a, struct list_elem *b, void *aux) {
-  return list_entry(a, struct thread, elem)->priority > list_entry(b, struct thread, elem)->priority;
-}
-
-
 
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
@@ -385,30 +349,14 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
-
-/* Función para establecer la prioridad de un hilo */
-
+/* Sets the current thread's priority to NEW_PRIORITY. */
 void
-thread_set_priority(int new_priority) {
-  enum intr_level old_level = intr_disable();  // Deshabilita las interrupciones y guarda el nivel anterior
-
-  thread_current()->basepriority = new_priority;  // Establece la nueva prioridad base del hilo actual
-
-  // Si la lista de donaciones está vacía o la nueva prioridad es mayor que la prioridad actual del hilo
-  if (list_empty(&thread_current()->donation_list) || new_priority > thread_current()->priority) {
-    thread_current()->priority = new_priority;  // Actualiza la prioridad del hilo
-  }
-
-  // Si la lista de hilos listos no está vacía y la prioridad del primer hilo en la lista es mayor que la prioridad del hilo actual
-  if (!list_empty(&ready_list) && list_entry(list_front(&ready_list), struct thread, elem)->priority > thread_current()->priority) {
-    thread_yield();  // Cede el procesador para ejecutar el hilo de mayor prioridad
-  }
-
-  intr_set_level(old_level);  // Restaura el nivel de interrupción al valor anterior
+thread_set_priority (int new_priority)
+{
+  thread_current ()->priority = new_priority;
 }
 
-
-
+/* Returns the current thread's priority. */
 int
 thread_get_priority (void)
 {
@@ -435,6 +383,7 @@ int
 thread_get_load_avg (void)
 {
   /* Not yet implemented. */
+  return 0;
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
@@ -442,6 +391,7 @@ int
 thread_get_recent_cpu (void)
 {
   /* Not yet implemented. */
+  return 0;
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -514,38 +464,29 @@ is_thread (struct thread *t)
   return t != NULL && t->magic == THREAD_MAGIC;
 }
 
-
-/*
- * Esta función inicializa un hilo con sus atributos básicos y realiza cambios adicionales.
- * Los cambios incluyen la inicialización de la lista de donaciones, establecimiento de la prioridad base,
- * y la configuración de punteros relacionados con la sincronización y bloqueo de hilos.
- */
+/* Does basic initialization of T as a blocked thread named
+   NAME. */
 static void
-init_thread(struct thread *t, const char *name, int priority) {
-  enum intr_level old_level;
+init_thread (struct thread *t, const char *name, int priority)
+{
+  ASSERT (t != NULL);
+  ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
+  ASSERT (name != NULL);
 
-  ASSERT(t != NULL);
-  ASSERT(PRI_MIN <= priority && priority <= PRI_MAX);
-  ASSERT(name != NULL);
-
-  // Inicialización de atributos básicos del hilo
-  memset(t, 0, sizeof *t);
+  memset (t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
-  strlcpy(t->name, name, sizeof t->name);
-  t->stack = (uint8_t *)t + PGSIZE;
+  strlcpy (t->name, name, sizeof t->name);
+  t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
-
-
-  list_init(&t->donation_list);      // Inicializa la lista de donaciones del hilo
-  t->basepriority = priority;        // Establece la prioridad base del hilo
-  t->locker_thread = NULL;           // Inicializa el puntero al hilo que posee el candado que este hilo está esperando
-  t->waiting_on_lock = NULL;         // Inicializa el puntero al candado que este hilo está esperando
-
-
-  old_level = intr_disable();
-  list_push_back(&all_list, &t->allelem);
-  intr_set_level(old_level);
+  list_push_back (&all_list, &t->allelem);
+	list_init(&t->file_list);
+  t->fd = 2;                  /* El descriptor del fichero mínimo es 2 */
+  list_init(&t->child_list);
+  t->cp = NULL;               /* Los hijos del padre son nulos al principio */
+  t->parent = -1;             /* Aún no hay padres */
+  list_init(&t->lock_list);
+  t->executable = NULL;
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
@@ -661,3 +602,53 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+/* Recorre cada lista de threads y comprueba si el hilo con el pid
+   deseado está vivo */
+int is_thread_alive (int pid){
+  struct list_elem *e;
+  struct list_elem *next;
+  for (e = list_begin(&all_list); e != list_end(&all_list); e = next)
+  {
+    next = list_next(e);
+    struct thread *t = list_entry (e, struct thread, allelem);
+    if (t->tid == pid)
+    {
+      /* Si el pid coincide devuelve true */
+      return 1;
+    }
+  }
+  return 0; /* Si no hay coincidencias con el tid entonces el thread ya no está vivo */
+}
+
+/* Añade un nuevo proceso hijo a la lista */
+struct child_process* add_child_process (int pid)
+{
+  struct child_process *cp = malloc(sizeof(struct child_process));
+  cp->pid = pid;
+  cp->load_status = NOT_LOADED;
+  cp->wait = 0; /* False */
+  cp->exit = 0; /* False */
+  sema_init(&cp->load_sema, 0);
+  sema_init(&cp->exit_sema, 0);
+  list_push_back(&thread_current()->child_list, &cp->elem);
+
+  return cp;
+}
+
+/* Libera todos los cierres */
+void
+thread_release_locks (void)
+{
+  struct thread *t = thread_current();
+  struct list_elem *e;
+  struct list_elem *next;
+
+  for (e = list_begin(&t->lock_list); e != list_end(&t->lock_list); e = next)
+  {
+    next = list_next(e);
+    struct lock *lock_ptr = list_entry (e, struct lock, elem);
+    lock_release(lock_ptr);
+    list_remove(&lock_ptr->elem);
+  }
+}

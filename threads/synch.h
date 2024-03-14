@@ -22,6 +22,7 @@ struct lock
   {
     struct thread *holder;      /* Thread holding lock (for debugging). */
     struct semaphore semaphore; /* Binary semaphore controlling access. */
+    struct list_elem elem;
   };
 
 void lock_init (struct lock *);
@@ -40,14 +41,6 @@ void cond_init (struct condition *);
 void cond_wait (struct condition *, struct lock *);
 void cond_signal (struct condition *, struct lock *);
 void cond_broadcast (struct condition *, struct lock *);
-
-
-// Función de comparación para la variable de condición
-// Compara dos elementos de la lista, que son nodos de hilo (struct thread)
-// El criterio de comparación es la prioridad de los hilos asociados a los elementos
-// Retorna true si la prioridad del primer hilo es menor que la del segundo, false de lo contrario
-bool conditional_var_comparator(struct list_elem *a, struct list_elem *b, void *aux);
-
 
 /* Optimization barrier.
 
